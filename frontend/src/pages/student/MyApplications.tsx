@@ -14,6 +14,8 @@ import {
 } from "lucide-react";
 import { applicationsApi } from "../../api/endpoints";
 import { Application, ApplicationStatusType } from "../../api/types";
+import { AtsReportModal, AtsScoreBadge } from "../../components/AtsScore";
+import { usePendingScoreRefresh } from "../../hooks/usePendingScoreRefresh";
 import { DashboardLayout } from "../../components/DashboardLayout";
 import { Modal } from "../../components/Modal";
 import { StatusBadge } from "../../components/StatusBadge";
@@ -30,9 +32,11 @@ export const MyApplications: React.FC = () => {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [successToast, setSuccessToast] = useState<string | null>(null);
+  const [atsReportApp, setAtsReportApp] = useState<Application | null>(null);
 
-  const fetchApplications = async () => {
-    setIsLoading(true);
+  // silent: refresh in place (e.g. while ATS scores are pending) without the loading spinner
+  const fetchApplications = async ({ silent = false } = {}) => {
+    if (!silent) setIsLoading(true);
     setError(null);
     try {
       const data = await applicationsApi.listStudentApplications();
@@ -47,6 +51,8 @@ export const MyApplications: React.FC = () => {
   useEffect(() => {
     fetchApplications();
   }, []);
+
+  usePendingScoreRefresh(applications, () => fetchApplications({ silent: true }));
 
   const handleDownloadResume = async (app: Application) => {
     try {
@@ -64,7 +70,7 @@ export const MyApplications: React.FC = () => {
     setUploadError(null);
     try {
       await applicationsApi.uploadResume(replacingApp.application_id, newResumeFile);
-      setSuccessToast("Resume updated successfully!");
+      setSuccessToast("Resume updated! Your ATS score will appear within about 30 seconds.");
       setReplacingApp(null);
       setNewResumeFile(null);
       fetchApplications();
@@ -237,7 +243,10 @@ export const MyApplications: React.FC = () => {
                   <div className="flex items-center gap-2">
                     <FileText className="h-4 w-4 text-slate-400" />
                     {app.resume_path ? (
-                      <span className="text-slate-600 font-medium">Resume attached on file</span>
+                      <>
+                        <span className="text-slate-600 font-medium">Resume attached on file</span>
+                        <AtsScoreBadge app={app} onClick={() => setAtsReportApp(app)} />
+                      </>
                     ) : (
                       <span className="text-amber-600 font-medium">No resume attached</span>
                     )}
@@ -271,6 +280,14 @@ export const MyApplications: React.FC = () => {
           })}
         </div>
       )}
+
+      <AtsReportModal
+        key={atsReportApp?.application_id ?? "closed"}
+        app={atsReportApp}
+        viewer="student"
+        onClose={() => setAtsReportApp(null)}
+        onScoreChange={() => fetchApplications({ silent: true })}
+      />
 
       {/* Replace Resume Modal */}
       {replacingApp && (

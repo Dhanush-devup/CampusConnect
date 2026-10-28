@@ -76,7 +76,7 @@ export const UserManagement: React.FC = () => {
   return (
     <DashboardLayout
       title="User Account Management"
-      subtitle="Supervise active and disabled user accounts across students, recruiters, and administrators."
+      subtitle="Approve new recruiters and supervise user accounts across students, recruiters, and administrators."
     >
       {success && (
         <div className="mb-6 rounded-xl bg-emerald-50 border border-emerald-200 p-4 text-xs font-semibold text-emerald-800 flex items-center justify-between">
@@ -128,6 +128,7 @@ export const UserManagement: React.FC = () => {
             className="rounded-xl border border-slate-300 px-3 py-2.5 text-xs text-slate-700 bg-white focus:border-indigo-600 focus:outline-none"
           >
             <option value="">All Statuses</option>
+            <option value="pending">Pending Approval</option>
             <option value="active">Active Only</option>
             <option value="disabled">Disabled Only</option>
           </select>
@@ -211,7 +212,11 @@ export const UserManagement: React.FC = () => {
                             }`}
                           >
                             <Power className="h-3.5 w-3.5" />
-                            {u.account_status === "active" ? "Disable Account" : "Reactivate"}
+                            {u.account_status === "active"
+                              ? "Disable Account"
+                              : u.account_status === "pending"
+                                ? "Approve"
+                                : "Reactivate"}
                           </button>
                         )}
                       </td>

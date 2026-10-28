@@ -4,22 +4,26 @@ Enforces CGPA eligibility, deadline checks, duplicate application prevention,
 cross-company recruiter restrictions, and authorized file downloads.
 """
 from datetime import datetime, timezone
+import json
 import os
 from pathlib import Path
 from typing import List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
+from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 
+from app.ats_scoring import mark_pending, score_application
 from app.auth import get_current_active_user, require_role
 from app.config import get_settings
-from app.database import get_db
+from app.database import get_db, get_session_factory
 from app.models import Application, Company, Opportunity, Student, User
 from app.schemas import (
+    APPLICATION_STATUS_TRANSITIONS,
     ApplicationDetailResponse,
     ApplicationStatusUpdate,
+    ResumeScoreResponse,
 )
 
 settings = get_settings()
@@ -31,6 +35,28 @@ def get_upload_dir() -> Path:
     upload_path = Path(settings.UPLOAD_DIR).resolve()
     upload_path.mkdir(parents=True, exist_ok=True)
     return upload_path
+
+
+def can_view_application(user: User, app: Application) -> bool:
+    """The applying student, recruiters of the hiring company, and admins may view an application's resume and score."""
+    if user.role == "admin":
+        return True
+    if user.role == "student":
+        return user.student_profile is not None and app.student_id == user.student_profile.student_id
+    if user.role == "recruiter":
+        return user.company_id is not None and app.opportunity.company_id == user.company_id
+    return False
+
+
+def schedule_scoring(
+    db: Session,
+    app: Application,
+    background_tasks: BackgroundTasks,
+    session_factory: sessionmaker,
+) -> None:
+    """Marks the application's ATS score as pending and scores the resume after the response is sent."""
+    mark_pending(db, app)
+    background_tasks.add_task(score_application, app.application_id, session_factory)
 
 
 def format_application_detail(app: Application) -> ApplicationDetailResponse:
@@ -59,6 +85,8 @@ def format_application_detail(app: Application) -> ApplicationDetailResponse:
         deadline=opp.deadline,
         company_name=company.company_name,
         company_location=company.location,
+        ats_score=app.resume_score.overall_score if app.resume_score else None,
+        ats_status=app.resume_score.status if app.resume_score else None,
     )
 
 
@@ -74,9 +102,11 @@ def format_application_detail(app: Application) -> ApplicationDetailResponse:
 )
 async def apply_to_opportunity(
     opportunity_id: int,
+    background_tasks: BackgroundTasks,
     resume: Optional[UploadFile] = File(None),
     current_user: User = Depends(require_role(["student"])),
     db: Session = Depends(get_db),
+    session_factory: sessionmaker = Depends(get_session_factory),
 ):
     """
     Submits an application for an eligible opportunity.
@@ -96,7 +126,7 @@ async def apply_to_opportunity(
 
     # 1. Check opportunity validity
     opp = db.query(Opportunity).filter(Opportunity.opportunity_id == opportunity_id).first()
-    if not opp:
+    if not opp or opp.status == "draft":
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Opportunity not found.",
@@ -180,6 +210,9 @@ async def apply_to_opportunity(
     db.add(new_app)
     db.commit()
     db.refresh(new_app)
+
+    if saved_resume_path:
+        schedule_scoring(db, new_app, background_tasks, session_factory)
 
     return format_application_detail(new_app)
 
@@ -269,7 +302,8 @@ def update_application_status(
     """
     Updates the hiring status of an application.
     Students cannot alter their own status.
-    Recruiters can only update candidates for their own company's opportunities.
+    Recruiters can only update candidates for their own company's opportunities,
+    and only along the pipeline in APPLICATION_STATUS_TRANSITIONS. Admins may override.
     """
     app = db.query(Application).filter(Application.application_id == application_id).first()
     if not app:
@@ -284,6 +318,16 @@ def update_application_status(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You cannot update applications belonging to another company.",
+            )
+
+        allowed = APPLICATION_STATUS_TRANSITIONS.get(app.status, [])
+        if payload.status != app.status and payload.status not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot move an application from '{app.status}' to '{payload.status}'. "
+                    f"Allowed next statuses: {', '.join(allowed) or 'none (final status)'}."
+                ),
             )
 
     app.status = payload.status
@@ -304,9 +348,11 @@ def update_application_status(
 )
 async def upload_application_resume(
     application_id: int,
+    background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     current_user: User = Depends(require_role(["student"])),
     db: Session = Depends(get_db),
+    session_factory: sessionmaker = Depends(get_session_factory),
 ):
     """
     Allows a student to upload or replace the resume for their existing application.
@@ -351,8 +397,13 @@ async def upload_application_resume(
     upload_dir = get_upload_dir()
     dest_path = upload_dir / safe_filename
 
-    # Delete old file if present
-    if app.resume_path and os.path.exists(app.resume_path):
+    # Delete the old file if present and no other application uses it (seeded demo data shares one file)
+    shared = (
+        db.query(Application)
+        .filter(Application.resume_path == app.resume_path, Application.application_id != app.application_id)
+        .first()
+    )
+    if app.resume_path and not shared and os.path.exists(app.resume_path):
         try:
             os.remove(app.resume_path)
         except OSError:
@@ -363,6 +414,7 @@ async def upload_application_resume(
 
     app.resume_path = str(dest_path)
     db.commit()
+    schedule_scoring(db, app, background_tasks, session_factory)
 
     return {
         "message": "Resume uploaded successfully.",
@@ -401,20 +453,7 @@ def download_application_resume(
             detail="No resume has been uploaded for this application.",
         )
 
-    # Access authorization check
-    is_owner_student = (
-        current_user.role == "student"
-        and current_user.student_profile
-        and app.student_id == current_user.student_profile.student_id
-    )
-    is_hiring_recruiter = (
-        current_user.role == "recruiter"
-        and current_user.company_id is not None
-        and app.opportunity.company_id == current_user.company_id
-    )
-    is_admin = current_user.role == "admin"
-
-    if not (is_owner_student or is_hiring_recruiter or is_admin):
+    if not can_view_application(current_user, app):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="You are not authorized to access this resume.",
@@ -446,3 +485,102 @@ def download_application_resume(
         media_type="application/pdf",
         filename=clean_download_name,
     )
+
+
+# ============================================================================
+# 4. ATS Resume Score
+# ============================================================================
+
+def get_viewable_application(application_id: int, current_user: User, db: Session) -> Application:
+    app = db.query(Application).filter(Application.application_id == application_id).first()
+    if not app:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Application not found.")
+    if not can_view_application(current_user, app):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="You are not authorized to view this application.",
+        )
+    return app
+
+
+def format_resume_score(app: Application) -> ResumeScoreResponse:
+    record = app.resume_score
+
+    def as_list(value: Optional[str]) -> List[str]:
+        return json.loads(value) if value else []
+
+    return ResumeScoreResponse(
+        application_id=app.application_id,
+        status=record.status,
+        overall_score=record.overall_score,
+        skills_score=record.skills_score,
+        experience_score=record.experience_score,
+        education_score=record.education_score,
+        formatting_score=record.formatting_score,
+        matched_skills=as_list(record.matched_skills),
+        missing_skills=as_list(record.missing_skills),
+        strengths=as_list(record.strengths),
+        improvements=as_list(record.improvements),
+        flags=as_list(record.flags),
+        summary=record.summary,
+        scored_by=record.scored_by,
+        error_message=record.error_message,
+        updated_at=record.updated_at,
+    )
+
+
+@router.get(
+    "/applications/{application_id}/ats-score",
+    response_model=ResumeScoreResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get ATS Resume Score Report",
+)
+def get_ats_score(
+    application_id: int,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+):
+    """
+    Returns the ATS score report for an application's resume.
+    Visible to the applying student, the hiring company's recruiters, and admins.
+    """
+    app = get_viewable_application(application_id, current_user, db)
+    if not app.resume_score:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="This resume has not been scored yet.",
+        )
+    return format_resume_score(app)
+
+
+@router.post(
+    "/applications/{application_id}/ats-score",
+    response_model=ResumeScoreResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="Score or Re-score an Application's Resume",
+)
+def request_ats_score(
+    application_id: int,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_active_user),
+    db: Session = Depends(get_db),
+    session_factory: sessionmaker = Depends(get_session_factory),
+):
+    """
+    Queues ATS scoring for an application's resume (e.g. resumes uploaded before
+    scoring existed, or after a failure). Returns the pending score record.
+    """
+    app = get_viewable_application(application_id, current_user, db)
+    if not app.resume_path:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="No resume has been uploaded for this application.",
+        )
+    if app.resume_score and app.resume_score.status == "pending":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="This resume is already being scored.",
+        )
+    schedule_scoring(db, app, background_tasks, session_factory)
+    db.refresh(app)
+    return format_resume_score(app)

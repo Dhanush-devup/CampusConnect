@@ -22,6 +22,8 @@ Use these pre-configured accounts to evaluate each role immediately (also availa
 
 All recruiter demo accounts use the standard password: **`Demo@123`**
 
+> **New recruiter sign-ups need approval.** Recruiters who register through the app start as **Pending** and cannot log in until an admin approves them under **Admin → User Management** (filter: *Pending Approval*). The seeded accounts below are already active.
+
 | Recruiter Name | Recruiter Email | Company Name | Industry | Location | Postings |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Vikram Sharma** | `recruiter@techcorp.com` | **TechCorp Solutions** | Software & Cloud Services | Bangalore | 3 Jobs |
@@ -62,17 +64,17 @@ The seeding script is completely idempotent and safe to run multiple times. It u
 
 ```powershell
 # From the backend directory
-cd C:\Users\dhanu\OneDrive\Desktop\CampusConnect\backend
+cd CampusConnect\backend
 .\venv\Scripts\python seed_demo_data.py
 
 # Or from the project root directory
-cd C:\Users\dhanu\OneDrive\Desktop\CampusConnect
+cd CampusConnect
 .\backend\venv\Scripts\python backend\seed_demo_data.py
 ```
 
 ### Quick Database Inspection
 To view all 5 tables in your terminal at any time, run:
 ```powershell
-cd C:\Users\dhanu\OneDrive\Desktop\CampusConnect\backend
+cd CampusConnect\backend
 .\venv\Scripts\python view_db.py
 ```

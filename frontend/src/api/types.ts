@@ -1,5 +1,5 @@
 export type RoleType = "student" | "recruiter" | "admin";
-export type AccountStatusType = "active" | "disabled";
+export type AccountStatusType = "pending" | "active" | "disabled";
 export type OpportunityType = "internship" | "full_time" | "part_time";
 export type OpportunityStatusType = "draft" | "open" | "closed";
 export type ApplicationStatusType =
@@ -9,6 +9,17 @@ export type ApplicationStatusType =
   | "interview"
   | "selected"
   | "rejected";
+
+// Mirrors APPLICATION_STATUS_TRANSITIONS in backend/app/schemas.py.
+// Recruiters may only move an application to these next statuses; selected/rejected are final.
+export const APPLICATION_STATUS_TRANSITIONS: Record<ApplicationStatusType, ApplicationStatusType[]> = {
+  applied: ["under_review", "shortlisted", "rejected"],
+  under_review: ["shortlisted", "rejected"],
+  shortlisted: ["interview", "rejected"],
+  interview: ["selected", "rejected"],
+  selected: [],
+  rejected: [],
+};
 
 export interface StudentProfile {
   student_id: number;
@@ -38,6 +49,11 @@ export interface User {
   created_at: string;
   student_profile?: StudentProfile | null;
   company?: Company | null;
+}
+
+export interface RecruiterRegisterResponse {
+  message: string;
+  user: User;
 }
 
 export interface AuthResponse {
@@ -83,6 +99,30 @@ export interface Application {
   deadline: string;
   company_name: string;
   company_location?: string | null;
+  ats_score?: number | null;
+  ats_status?: ResumeScoreStatusType | null;
+}
+
+export type ResumeScoreStatusType = "pending" | "completed" | "failed";
+
+export interface ResumeScore {
+  application_id: number;
+  status: ResumeScoreStatusType;
+  overall_score?: number | null;
+  skills_score?: number | null;
+  experience_score?: number | null;
+  education_score?: number | null;
+  formatting_score?: number | null;
+  matched_skills: string[];
+  missing_skills: string[];
+  strengths: string[];
+  improvements: string[];
+  // "low_text" | "long_document" | "possible_manipulation"
+  flags: string[];
+  summary?: string | null;
+  scored_by?: "gemini" | "rules" | null;
+  error_message?: string | null;
+  updated_at: string;
 }
 
 export interface StudentDashboardStats {

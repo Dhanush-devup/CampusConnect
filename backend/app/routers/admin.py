@@ -34,7 +34,7 @@ router = APIRouter(prefix="/api/admin", tags=["Admin Oversight"])
 )
 def list_all_users(
     role: Optional[str] = Query(None, description="Filter by role: student, recruiter, admin"),
-    account_status: Optional[str] = Query(None, description="Filter by account status: active, disabled"),
+    account_status: Optional[str] = Query(None, description="Filter by account status: pending, active, disabled"),
     search: Optional[str] = Query(None, description="Search user name or email"),
     current_user: User = Depends(require_role(["admin"])),
     db: Session = Depends(get_db),
@@ -68,7 +68,7 @@ def update_user_account_status(
     db: Session = Depends(get_db),
 ):
     """
-    Toggles a user account between 'active' and 'disabled'.
+    Approves a pending recruiter (-> 'active') or toggles an account between 'active' and 'disabled'.
     Disabled users are immediately prevented from authenticating or performing actions.
     Prevents an admin from accidentally disabling their own account.
     """

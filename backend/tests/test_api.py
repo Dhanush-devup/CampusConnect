@@ -27,7 +27,8 @@ def register_student(client, email="alice@test.edu", password="Password123!", na
     )
 
 
-def register_recruiter(client, email="recruiter@tech.com", password="Password123!", company_name="TechCorp"):
+def signup_recruiter(client, email="recruiter@tech.com", password="Password123!", company_name="TechCorp"):
+    """Submits recruiter registration; the account is left pending admin approval."""
     return client.post(
         "/api/auth/register/recruiter",
         json={
@@ -42,6 +43,52 @@ def register_recruiter(client, email="recruiter@tech.com", password="Password123
             "website": "https://techcorp.com",
         },
     )
+
+
+def approve_user(client, user_id):
+    """Activates a pending account directly in the test database."""
+    from app.database import get_db
+    from app.models import User
+
+    db = next(client.app.dependency_overrides[get_db]())
+    db.query(User).filter(User.user_id == user_id).update({"account_status": "active"})
+    db.commit()
+
+
+def register_recruiter(client, email="recruiter@tech.com", password="Password123!", company_name="TechCorp"):
+    """Signs up a recruiter, approves the account, and returns the login response."""
+    signup = signup_recruiter(client, email=email, password=password, company_name=company_name)
+    assert signup.status_code == status.HTTP_201_CREATED, signup.text
+    approve_user(client, signup.json()["user"]["user_id"])
+    return client.post("/api/auth/login", json={"email": email, "password": password})
+
+
+def create_admin_token(client, db_session, email="dean@campusconnect.edu", password="AdminSecure!"):
+    from app.auth import hash_password
+    from app.models import User
+
+    db_session.add(User(
+        name="Dean of Placements",
+        email=email,
+        password_hash=hash_password(password),
+        role="admin",
+        account_status="active",
+    ))
+    db_session.commit()
+    return client.post("/api/auth/login", json={"email": email, "password": password}).json()["access_token"]
+
+
+def move_application(client, token, app_id, *statuses):
+    """Walks an application through the given statuses, asserting each step succeeds."""
+    res = None
+    for next_status in statuses:
+        res = client.patch(
+            f"/api/applications/{app_id}/status",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"status": next_status},
+        )
+        assert res.status_code == status.HTTP_200_OK, res.text
+    return res
 
 
 def create_job(client, token, title="Software Engineer Intern", eligibility_cgpa=7.0, status="open"):
@@ -78,13 +125,50 @@ def test_student_registration_success(client):
 
 
 def test_recruiter_registration_success(client):
-    """Recruiter registration must atomically create company + user and return token."""
-    res = register_recruiter(client, email="recruiter1@acme.com", company_name="Acme Corp")
+    """Recruiter registration creates company + pending user and issues no token."""
+    res = signup_recruiter(client, email="recruiter1@acme.com", company_name="Acme Corp")
     assert res.status_code == status.HTTP_201_CREATED
     data = res.json()
-    assert "access_token" in data
+    assert "access_token" not in data
     assert data["user"]["role"] == "recruiter"
+    assert data["user"]["account_status"] == "pending"
     assert data["user"]["company"]["company_name"] == "Acme Corp"
+
+
+def test_pending_recruiter_needs_admin_approval(client, db_session):
+    """Pending recruiters cannot log in until an admin approves them."""
+    signup = signup_recruiter(client, email="newrec@startup.com", password="Password123!", company_name="Startup")
+    user_id = signup.json()["user"]["user_id"]
+    credentials = {"email": "newrec@startup.com", "password": "Password123!"}
+
+    blocked = client.post("/api/auth/login", json=credentials)
+    assert blocked.status_code == status.HTTP_403_FORBIDDEN
+    assert "awaiting approval" in blocked.json()["detail"]
+
+    admin_token = create_admin_token(client, db_session)
+    pending = client.get(
+        "/api/admin/users?account_status=pending",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert [u["user_id"] for u in pending.json()] == [user_id]
+
+    approve = client.patch(
+        f"/api/admin/users/{user_id}/status",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"account_status": "active"},
+    )
+    assert approve.status_code == status.HTTP_200_OK
+
+    allowed = client.post("/api/auth/login", json=credentials)
+    assert allowed.status_code == status.HTTP_200_OK
+
+    # Admins cannot put an account back into pending
+    res = client.patch(
+        f"/api/admin/users/{user_id}/status",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"account_status": "pending"},
+    )
+    assert res.status_code == 422
 
 
 def test_duplicate_registration_rejected(client):
@@ -215,6 +299,41 @@ def test_opportunity_search_and_filters(client):
     assert "Machine Learning Scientist" not in titles
 
 
+def test_draft_opportunities_visible_only_to_owner_and_admin(client, db_session):
+    """Drafts must not leak to the public, students, or other companies."""
+    owner = register_recruiter(client, email="rec_draft@apple.com", company_name="Apple").json()
+    other = register_recruiter(client, email="rec_draft@samsung.com", company_name="Samsung").json()
+    student = register_student(client, email="draft_peek@college.edu", cgpa=9.5).json()
+    admin_token = create_admin_token(client, db_session)
+
+    draft = create_job(client, owner["access_token"], title="Secret Vision Pro Intern", status="draft").json()
+    draft_id = draft["opportunity_id"]
+
+    def auth(token):
+        return {"Authorization": f"Bearer {token}"} if token else {}
+
+    def listed(token):
+        res = client.get("/api/opportunities?status=draft", headers=auth(token))
+        assert res.status_code == status.HTTP_200_OK
+        return [o["opportunity_id"] for o in res.json()]
+
+    # Hidden from anonymous users, students, and other recruiters
+    for token in (None, student["access_token"], other["access_token"]):
+        assert draft_id not in listed(token)
+        detail = client.get(f"/api/opportunities/{draft_id}", headers=auth(token))
+        assert detail.status_code == status.HTTP_404_NOT_FOUND
+
+    # Students cannot apply to a draft
+    apply = client.post(f"/api/opportunities/{draft_id}/apply", headers=auth(student["access_token"]))
+    assert apply.status_code == status.HTTP_404_NOT_FOUND
+
+    # Visible to the owning company and admins
+    for token in (owner["access_token"], admin_token):
+        assert draft_id in listed(token)
+        detail = client.get(f"/api/opportunities/{draft_id}", headers=auth(token))
+        assert detail.status_code == status.HTTP_200_OK
+
+
 # ============================================================================
 # 3. Application Submission & Business Rules
 # ============================================================================
@@ -292,13 +411,47 @@ def test_recruiter_updates_status_and_cross_company_isolation(client):
     assert rec2_change.status_code == status.HTTP_403_FORBIDDEN
 
     # Recruiter 1 (from Meta) successfully updates status
-    rec1_change = client.patch(
-        f"/api/applications/{app_id}/status",
-        headers={"Authorization": f"Bearer {rec1['access_token']}"},
-        json={"status": "interview"},
-    )
-    assert rec1_change.status_code == status.HTTP_200_OK
+    rec1_change = move_application(client, rec1["access_token"], app_id, "shortlisted", "interview")
     assert rec1_change.json()["status"] == "interview"
+
+
+def test_application_status_transitions(client, db_session):
+    """Recruiters must follow the hiring pipeline; final statuses are locked; admins can override."""
+    rec = register_recruiter(client, email="rec_flow@ibm.com", company_name="IBM").json()
+    student = register_student(client, email="flow@college.edu", cgpa=9.0).json()
+    job = create_job(client, rec["access_token"], title="Quantum Intern").json()
+    app_id = client.post(
+        f"/api/opportunities/{job['opportunity_id']}/apply",
+        headers={"Authorization": f"Bearer {student['access_token']}"},
+    ).json()["application_id"]
+
+    def patch(token, new_status):
+        return client.patch(
+            f"/api/applications/{app_id}/status",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"status": new_status},
+        )
+
+    # Cannot skip straight from applied to selected
+    skip = patch(rec["access_token"], "selected")
+    assert skip.status_code == status.HTTP_400_BAD_REQUEST
+    assert "Allowed next statuses" in skip.json()["detail"]
+
+    # Setting the current status again is a harmless no-op
+    assert patch(rec["access_token"], "applied").status_code == status.HTTP_200_OK
+
+    move_application(client, rec["access_token"], app_id, "under_review", "rejected")
+
+    # Rejected is final for recruiters
+    reopen = patch(rec["access_token"], "applied")
+    assert reopen.status_code == status.HTTP_400_BAD_REQUEST
+    assert "final status" in reopen.json()["detail"]
+
+    # Admin can correct a mistake
+    admin_token = create_admin_token(client, db_session)
+    override = patch(admin_token, "shortlisted")
+    assert override.status_code == status.HTTP_200_OK
+    assert override.json()["status"] == "shortlisted"
 
 
 # ============================================================================
@@ -379,22 +532,7 @@ def test_admin_oversight_and_statistics(client, db_session):
     - Global applications listing
     - Placement statistics calculation
     """
-    from app.auth import hash_password
-    from app.models import User
-
-    # Create admin user
-    admin_user = User(
-        name="Dean of Placements",
-        email="dean@campusconnect.edu",
-        password_hash=hash_password("AdminSecure!"),
-        role="admin",
-        account_status="active",
-    )
-    db_session.add(admin_user)
-    db_session.commit()
-
-    admin_login = client.post("/api/auth/login", json={"email": "dean@campusconnect.edu", "password": "AdminSecure!"}).json()
-    admin_token = admin_login["access_token"]
+    admin_token = create_admin_token(client, db_session)
 
     # Create test data
     rec = register_recruiter(client, email="stats_co@oracle.com", company_name="Oracle").json()
@@ -407,11 +545,7 @@ def test_admin_oversight_and_statistics(client, db_session):
     ).json()
 
     # Recruiter selects candidate
-    client.patch(
-        f"/api/applications/{app['application_id']}/status",
-        headers={"Authorization": f"Bearer {rec['access_token']}"},
-        json={"status": "selected"},
-    )
+    move_application(client, rec["access_token"], app["application_id"], "shortlisted", "interview", "selected")
 
     # 1. Admin lists all applications
     admin_apps = client.get("/api/admin/applications", headers={"Authorization": f"Bearer {admin_token}"})

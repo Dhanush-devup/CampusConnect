@@ -10,7 +10,7 @@ import argparse
 import sys
 from app.auth import hash_password
 from app.config import get_settings
-from app.database import SessionLocal, init_db
+from app.database import SessionLocal, upgrade_db
 from app.models import User
 
 settings = get_settings()
@@ -18,7 +18,7 @@ settings = get_settings()
 
 def create_or_update_admin(email: str, password: str, name: str):
     """Provisions an administrator account in the SQLite database."""
-    init_db()
+    upgrade_db()
     session = SessionLocal()
     try:
         clean_email = email.lower().strip()

@@ -12,10 +12,21 @@ import {
   Users,
 } from "lucide-react";
 import { applicationsApi, opportunitiesApi } from "../../api/endpoints";
-import { Application, ApplicationStatusType, Opportunity } from "../../api/types";
+import { APPLICATION_STATUS_TRANSITIONS, Application, ApplicationStatusType, Opportunity } from "../../api/types";
+import { AtsReportModal, AtsScoreBadge } from "../../components/AtsScore";
+import { usePendingScoreRefresh } from "../../hooks/usePendingScoreRefresh";
 import { DashboardLayout } from "../../components/DashboardLayout";
 import { StatusBadge } from "../../components/StatusBadge";
 import { useAuth } from "../../context/AuthContext";
+
+const STAGE_ACTION_LABELS: Record<ApplicationStatusType, string> = {
+  applied: "Mark as Applied",
+  under_review: "Mark Under Review",
+  shortlisted: "Shortlist Candidate",
+  interview: "Schedule Interview",
+  selected: "Select / Offer",
+  rejected: "Reject",
+};
 
 export const ReviewApplications: React.FC = () => {
   const { user } = useAuth();
@@ -30,8 +41,11 @@ export const ReviewApplications: React.FC = () => {
   const [statusFilter, setStatusFilter] = useState<string>("");
   const [departmentFilter, setDepartmentFilter] = useState<string>("");
 
-  const fetchData = async () => {
-    setIsLoading(true);
+  const [atsReportApp, setAtsReportApp] = useState<Application | null>(null);
+
+  // silent: refresh in place (e.g. while ATS scores are pending) without the loading spinner
+  const fetchData = async ({ silent = false } = {}) => {
+    if (!silent) setIsLoading(true);
     setError(null);
     try {
       const [apps, opps] = await Promise.all([
@@ -54,6 +68,8 @@ export const ReviewApplications: React.FC = () => {
   useEffect(() => {
     fetchData();
   }, [selectedOppId, statusFilter, departmentFilter, user]);
+
+  usePendingScoreRefresh(applications, () => fetchData({ silent: true }));
 
   const handleStatusChange = async (appId: number, nextStatus: ApplicationStatusType) => {
     try {
@@ -187,6 +203,7 @@ export const ReviewApplications: React.FC = () => {
                   <th className="py-3.5 px-4">Target Job</th>
                   <th className="py-3.5 px-4">Current Stage</th>
                   <th className="py-3.5 px-4">Resume</th>
+                  <th className="py-3.5 px-4" title="Advisory score of the resume against this job">ATS Score</th>
                   <th className="py-3.5 px-6 text-right">Update Hiring Stage</th>
                 </tr>
               </thead>
@@ -240,19 +257,29 @@ export const ReviewApplications: React.FC = () => {
                       )}
                     </td>
 
+                    {/* ATS Score */}
+                    <td className="py-4 px-4">
+                      <AtsScoreBadge app={app} onClick={() => setAtsReportApp(app)} />
+                    </td>
+
                     {/* Action Selector */}
                     <td className="py-4 px-6 text-right">
                       <select
                         value={app.status}
                         onChange={(e) => handleStatusChange(app.application_id, e.target.value as ApplicationStatusType)}
-                        className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs focus:border-violet-600 focus:outline-none"
+                        disabled={APPLICATION_STATUS_TRANSITIONS[app.status].length === 0}
+                        title={APPLICATION_STATUS_TRANSITIONS[app.status].length === 0 ? "Final status" : undefined}
+                        className="rounded-xl border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-xs focus:border-violet-600 focus:outline-none disabled:opacity-60 disabled:cursor-not-allowed"
                       >
-                        <option value="applied">Mark as Applied</option>
-                        <option value="under_review">Mark Under Review</option>
-                        <option value="shortlisted">Shortlist Candidate</option>
-                        <option value="interview">Schedule Interview</option>
-                        <option value="selected">Select / Offer</option>
-                        <option value="rejected">Reject</option>
+                        {(Object.keys(STAGE_ACTION_LABELS) as ApplicationStatusType[]).map((stage) => (
+                          <option
+                            key={stage}
+                            value={stage}
+                            disabled={stage !== app.status && !APPLICATION_STATUS_TRANSITIONS[app.status].includes(stage)}
+                          >
+                            {STAGE_ACTION_LABELS[stage]}
+                          </option>
+                        ))}
                       </select>
                     </td>
                   </tr>
@@ -262,6 +289,14 @@ export const ReviewApplications: React.FC = () => {
           </div>
         </div>
       )}
+
+      <AtsReportModal
+        key={atsReportApp?.application_id ?? "closed"}
+        app={atsReportApp}
+        viewer="recruiter"
+        onClose={() => setAtsReportApp(null)}
+        onScoreChange={() => fetchData({ silent: true })}
+      />
     </DashboardLayout>
   );
 };
