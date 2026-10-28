@@ -5,6 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.auth import (
+    ACCOUNT_STATUS_ERRORS,
     create_access_token,
     get_current_active_user,
     hash_password,
@@ -16,6 +17,7 @@ from app.schemas import (
     CompanyRead,
     LoginRequest,
     RecruiterRegisterRequest,
+    RecruiterRegisterResponse,
     StudentRead,
     StudentRegisterRequest,
     TokenResponse,
@@ -115,7 +117,7 @@ def register_student(
 
 @router.post(
     "/register/recruiter",
-    response_model=TokenResponse,
+    response_model=RecruiterRegisterResponse,
     status_code=status.HTTP_201_CREATED,
     summary="Recruiter & Company Registration",
 )
@@ -126,6 +128,8 @@ def register_recruiter(
     """
     Registers a new recruiter account along with their company profile
     in a single atomic database transaction.
+    The account starts as 'pending' and cannot log in until an admin approves it,
+    so no access token is issued here.
     """
     # 1. Check user email uniqueness
     existing_user = db.query(User).filter(User.email == payload.email.lower().strip()).first()
@@ -147,33 +151,22 @@ def register_recruiter(
     db.add(new_company)
     db.flush()  # Generates new_company.company_id within transaction
 
-    # 3. Create Recruiter User record
+    # 3. Create Recruiter User record awaiting admin approval
     hashed_pwd = hash_password(payload.password)
     new_user = User(
         name=payload.name.strip(),
         email=payload.email.lower().strip(),
         password_hash=hashed_pwd,
         role="recruiter",
-        account_status="active",
+        account_status="pending",
         company_id=new_company.company_id,
     )
     db.add(new_user)
     db.commit()
     db.refresh(new_user)
 
-    # 4. Issue JWT access token
-    token = create_access_token(
-        data={
-            "sub": str(new_user.user_id),
-            "email": new_user.email,
-            "role": new_user.role,
-            "name": new_user.name,
-        }
-    )
-
-    return TokenResponse(
-        access_token=token,
-        token_type="bearer",
+    return RecruiterRegisterResponse(
+        message="Registration received. You can log in once a placement administrator approves your account.",
         user=format_user_profile(new_user),
     )
 
@@ -207,11 +200,11 @@ def login(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    # Disabled account check
+    # Pending / disabled account check
     if user.account_status != "active":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been disabled. Please contact the administrator.",
+            detail=ACCOUNT_STATUS_ERRORS.get(user.account_status, ACCOUNT_STATUS_ERRORS["disabled"]),
         )
 
     # Issue JWT token

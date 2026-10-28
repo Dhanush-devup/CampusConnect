@@ -4,6 +4,7 @@ Initializes the database, exposes system endpoints, configures CORS,
 and registers all API route modules for CampusConnect.
 """
 from contextlib import asynccontextmanager
+import logging
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -14,12 +15,13 @@ from sqlalchemy.orm import Session
 
 from app.auth import hash_password
 from app.config import get_settings
-from app.database import SessionLocal, get_db, init_db
+from app.database import SessionLocal, get_db, upgrade_db
 from app.models import User
 from app.routers import admin, applications, auth, opportunities, profiles
 from app.schemas import HealthCheckResponse
 
 settings = get_settings()
+logger = logging.getLogger(__name__)
 
 
 def ensure_initial_admin():
@@ -40,6 +42,7 @@ def ensure_initial_admin():
             session.commit()
     except Exception:
         session.rollback()
+        logger.exception("Failed to create the initial admin account")
     finally:
         session.close()
 
@@ -48,9 +51,9 @@ def ensure_initial_admin():
 async def lifespan(app: FastAPI):
     """
     Application lifespan handler.
-    Initializes database tables, creates upload directories, and seeds initial admin.
+    Applies database migrations, creates upload directories, and seeds initial admin.
     """
-    init_db()
+    upgrade_db()
     # Ensure uploads directory exists
     Path(settings.UPLOAD_DIR).resolve().mkdir(parents=True, exist_ok=True)
     # Seed initial admin if necessary
@@ -72,13 +75,7 @@ app = FastAPI(
 # Enable CORS for local Vite development server
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5173",
-        "http://127.0.0.1:5173",
-        "http://localhost:3000",
-        "http://127.0.0.1:3000",
-        "*",
-    ],
+    allow_origins=settings.CORS_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

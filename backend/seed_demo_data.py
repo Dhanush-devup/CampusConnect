@@ -30,7 +30,7 @@ if str(BACKEND_DIR) not in sys.path:
 
 from app.auth import hash_password
 from app.config import get_settings
-from app.database import SessionLocal, init_db
+from app.database import SessionLocal, upgrade_db
 from app.models import Application, Company, Opportunity, Student, User
 
 settings = get_settings()
@@ -65,7 +65,7 @@ def create_sample_resume_pdf(target_path: Path):
 
 def seed_demo_data():
     """Main idempotent seeder function."""
-    init_db()
+    upgrade_db()
     session = SessionLocal()
 
     # Ensure uploads directory and sample resume exist

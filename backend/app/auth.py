@@ -17,6 +17,11 @@ settings = get_settings()
 
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/api/auth/login", auto_error=False)
 
+ACCOUNT_STATUS_ERRORS = {
+    "pending": "Your account is awaiting approval by the placement administrator.",
+    "disabled": "Your account has been disabled. Please contact the placement administrator.",
+}
+
 
 def hash_password(password: str) -> str:
     """Hash a plaintext password using bcrypt."""
@@ -125,12 +130,12 @@ def get_current_active_user(
 ) -> User:
     """
     Ensures that the authenticated user account is in 'active' status.
-    Disabled accounts are blocked from performing protected actions.
+    Pending and disabled accounts are blocked from performing protected actions.
     """
     if current_user.account_status != "active":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Your account has been disabled. Please contact the placement administrator.",
+            detail=ACCOUNT_STATUS_ERRORS.get(current_user.account_status, ACCOUNT_STATUS_ERRORS["disabled"]),
         )
     return current_user
 

@@ -122,6 +122,7 @@ def test_database_has_exactly_five_application_tables(test_engine):
         "companies",
         "opportunities",
         "applications",
+        "resume_scores",
     }
     assert expected_tables.issubset(table_names), f"Missing tables: {expected_tables - table_names}"
 

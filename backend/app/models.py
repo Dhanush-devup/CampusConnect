@@ -1,11 +1,12 @@
 """
 SQLAlchemy database models for CampusConnect.
-Defines the five core application tables:
+Defines the five core application tables plus ATS scoring:
 1. users
 2. students
 3. companies
 4. opportunities
 5. applications
+6. resume_scores
 """
 from datetime import datetime, timezone
 from sqlalchemy import (
@@ -33,7 +34,7 @@ class User(Base):
     Table A: users
     Stores base credentials and role information for all system actors.
     Roles: 'student', 'recruiter', 'admin'
-    Account statuses: 'active', 'disabled'
+    Account statuses: 'pending' (recruiter awaiting admin approval), 'active', 'disabled'
     """
     __tablename__ = "users"
 
@@ -56,7 +57,7 @@ class User(Base):
             name="check_user_role",
         ),
         CheckConstraint(
-            "account_status IN ('active', 'disabled')",
+            "account_status IN ('pending', 'active', 'disabled')",
             name="check_user_account_status",
         ),
     )
@@ -240,6 +241,64 @@ class Application(Base):
     # Relationships
     student = relationship("Student", back_populates="applications")
     opportunity = relationship("Opportunity", back_populates="applications")
+    resume_score = relationship(
+        "ResumeScore",
+        back_populates="application",
+        uselist=False,
+        cascade="all, delete-orphan",
+        passive_deletes=True,
+    )
 
     def __repr__(self) -> str:
         return f"<Application id={self.application_id} student={self.student_id} opp={self.opportunity_id} status={self.status}>"
+
+
+class ResumeScore(Base):
+    """
+    Table F: resume_scores
+    ATS score of an application's resume against the opportunity it was submitted to.
+    One row per application, replaced whenever the resume is (re)scored.
+    Statuses: 'pending', 'completed', 'failed'
+    scored_by: 'gemini' (AI-assisted) or 'rules' (keyword/rule-based fallback)
+    List fields are stored as JSON-encoded text.
+    """
+    __tablename__ = "resume_scores"
+
+    score_id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    application_id = Column(
+        Integer,
+        ForeignKey("applications.application_id", ondelete="CASCADE"),
+        nullable=False,
+        unique=True,
+    )
+    status = Column(String(20), nullable=False, default="pending")
+    overall_score = Column(Integer, nullable=True)
+    skills_score = Column(Integer, nullable=True)
+    experience_score = Column(Integer, nullable=True)
+    education_score = Column(Integer, nullable=True)
+    formatting_score = Column(Integer, nullable=True)
+    matched_skills = Column(Text, nullable=True)
+    missing_skills = Column(Text, nullable=True)
+    strengths = Column(Text, nullable=True)
+    improvements = Column(Text, nullable=True)
+    flags = Column(Text, nullable=True)
+    summary = Column(Text, nullable=True)
+    scored_by = Column(String(20), nullable=True)
+    error_message = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utc_now, onupdate=utc_now)
+
+    __table_args__ = (
+        CheckConstraint(
+            "status IN ('pending', 'completed', 'failed')",
+            name="check_resume_score_status",
+        ),
+        CheckConstraint(
+            "overall_score IS NULL OR (overall_score >= 0 AND overall_score <= 100)",
+            name="check_resume_score_range",
+        ),
+    )
+
+    application = relationship("Application", back_populates="resume_score")
+
+    def __repr__(self) -> str:
+        return f"<ResumeScore app={self.application_id} status={self.status} score={self.overall_score}>"

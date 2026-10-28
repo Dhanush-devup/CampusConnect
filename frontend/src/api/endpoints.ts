@@ -7,6 +7,8 @@ import {
   Company,
   Opportunity,
   OpportunityStatusType,
+  RecruiterRegisterResponse,
+  ResumeScore,
   RecruiterDashboardStats,
   StudentDashboardStats,
   User,
@@ -43,7 +45,7 @@ export const authApi = {
     location?: string;
     website?: string;
   }) =>
-    apiRequest<AuthResponse>("/api/auth/register/recruiter", {
+    apiRequest<RecruiterRegisterResponse>("/api/auth/register/recruiter", {
       method: "POST",
       body: JSON.stringify(data),
     }),
@@ -156,6 +158,14 @@ export const applicationsApi = {
 
   downloadResume: (applicationId: number, filename = "Resume.pdf") =>
     downloadFile(`/api/applications/${applicationId}/resume`, filename),
+
+  getAtsScore: (applicationId: number) =>
+    apiRequest<ResumeScore>(`/api/applications/${applicationId}/ats-score`),
+
+  requestAtsScore: (applicationId: number) =>
+    apiRequest<ResumeScore>(`/api/applications/${applicationId}/ats-score`, {
+      method: "POST",
+    }),
 };
 
 export const profilesApi = {

@@ -24,7 +24,7 @@ class HealthCheckResponse(BaseModel):
 # ============================================================================
 
 RoleType = Literal["student", "recruiter", "admin"]
-AccountStatusType = Literal["active", "disabled"]
+AccountStatusType = Literal["pending", "active", "disabled"]
 OpportunityType = Literal["internship", "full_time", "part_time"]
 OpportunityStatusType = Literal["draft", "open", "closed"]
 ApplicationStatusType = Literal[
@@ -35,6 +35,19 @@ ApplicationStatusType = Literal[
     "selected",
     "rejected",
 ]
+
+ResumeScoreStatusType = Literal["pending", "completed", "failed"]
+
+# Hiring pipeline: which statuses a recruiter may move an application to next.
+# 'selected' and 'rejected' are final. Admins may override to correct mistakes.
+APPLICATION_STATUS_TRANSITIONS: Dict[str, List[str]] = {
+    "applied": ["under_review", "shortlisted", "rejected"],
+    "under_review": ["shortlisted", "rejected"],
+    "shortlisted": ["interview", "rejected"],
+    "interview": ["selected", "rejected"],
+    "selected": [],
+    "rejected": [],
+}
 
 
 # ============================================================================
@@ -188,6 +201,11 @@ class TokenResponse(BaseModel):
     user: UserProfileResponse
 
 
+class RecruiterRegisterResponse(BaseModel):
+    message: str
+    user: UserProfileResponse
+
+
 # ============================================================================
 # Profile & Account Management Schemas
 # ============================================================================
@@ -209,7 +227,8 @@ class CompanyProfileUpdate(BaseModel):
 
 
 class UserStatusUpdate(BaseModel):
-    account_status: AccountStatusType
+    # Admins approve (active) or disable accounts; nothing is set back to pending
+    account_status: Literal["active", "disabled"]
 
 
 # ============================================================================
@@ -291,8 +310,30 @@ class ApplicationDetailResponse(BaseModel):
     deadline: datetime
     company_name: str
     company_location: Optional[str] = None
+    # ATS resume score summary (full report at /api/applications/{id}/ats-score)
+    ats_score: Optional[int] = None
+    ats_status: Optional[ResumeScoreStatusType] = None
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class ResumeScoreResponse(BaseModel):
+    application_id: int
+    status: ResumeScoreStatusType
+    overall_score: Optional[int] = None
+    skills_score: Optional[int] = None
+    experience_score: Optional[int] = None
+    education_score: Optional[int] = None
+    formatting_score: Optional[int] = None
+    matched_skills: List[str] = []
+    missing_skills: List[str] = []
+    strengths: List[str] = []
+    improvements: List[str] = []
+    flags: List[str] = []
+    summary: Optional[str] = None
+    scored_by: Optional[Literal["gemini", "rules"]] = None
+    error_message: Optional[str] = None
+    updated_at: datetime
 
 
 # ============================================================================

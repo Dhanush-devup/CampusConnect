@@ -25,17 +25,33 @@ def get_optional_current_user(
     token: Optional[str] = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> Optional[User]:
-    """Optional authentication dependency: returns User if valid token is provided, else None."""
+    """
+    Optional authentication dependency: returns the active User if a valid token
+    is provided, else None (pending/disabled accounts are treated as anonymous).
+    """
     if not token:
         return None
     try:
         payload = decode_access_token(token)
         user_id = payload.get("sub")
         if user_id:
-            return db.query(User).filter(User.user_id == int(user_id)).first()
+            return (
+                db.query(User)
+                .filter(User.user_id == int(user_id), User.account_status == "active")
+                .first()
+            )
     except Exception:
         return None
     return None
+
+
+def can_view_draft(opp: Opportunity, current_user: Optional[User]) -> bool:
+    """Drafts are visible only to admins and recruiters of the owning company."""
+    if current_user is None:
+        return False
+    if current_user.role == "admin":
+        return True
+    return current_user.role == "recruiter" and opp.company_id == current_user.company_id
 
 
 def format_opportunity_detail(
@@ -100,8 +116,17 @@ def list_opportunities(
     """
     Lists opportunities with search and filter capabilities.
     For unauthenticated users and students, defaults to 'open' opportunities.
+    Drafts are only ever returned to admins and to recruiters of the owning company.
     """
     query = db.query(Opportunity).join(Opportunity.company)
+
+    # Draft visibility
+    if not current_user or current_user.role == "student":
+        query = query.filter(Opportunity.status != "draft")
+    elif current_user.role == "recruiter":
+        query = query.filter(
+            or_(Opportunity.status != "draft", Opportunity.company_id == current_user.company_id)
+        )
 
     # Status filter logic
     if status_filter:
@@ -150,9 +175,9 @@ def get_opportunity(
     current_user: Optional[User] = Depends(get_optional_current_user),
     db: Session = Depends(get_db),
 ):
-    """Retrieves full details for a single opportunity."""
+    """Retrieves full details for a single opportunity. Drafts 404 for anyone who cannot see them."""
     opp = db.query(Opportunity).filter(Opportunity.opportunity_id == opportunity_id).first()
-    if not opp:
+    if not opp or (opp.status == "draft" and not can_view_draft(opp, current_user)):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Opportunity not found.",
